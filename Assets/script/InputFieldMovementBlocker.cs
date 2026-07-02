@@ -2,20 +2,33 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using TMPro;
+using UnityEngine.EventSystems;
+#if ENABLE_INPUT_SYSTEM
+using UnityEngine.InputSystem;
+#endif
 
+[DefaultExecutionOrder(-10000)]
 public class InputFieldMovementBlocker : MonoBehaviour
 {
-    [Tooltip("Trascina qui il GameObject 'Locomotion' dalla gerarchia")]
+    [Tooltip("Opzionale: usa il GameObject 'Move'. Se vuoto, viene cercato automaticamente.")]
     public GameObject locomotionObject;
+
+    [Tooltip("Tasto per attivare il campo di testo")]
+    public KeyCode activateKey = KeyCode.T;
 
     private TMP_InputField inputField;
     private bool locomotionWasActive;
     private bool isBlockingMovement;
     private readonly List<Behaviour> disabledMovementBehaviours = new List<Behaviour>();
+#if ENABLE_INPUT_SYSTEM
+    private readonly List<InputActionMap> disabledActionMaps = new List<InputActionMap>();
+#endif
+    private bool isActivating;
 
     private void Awake()
     {
         inputField = GetComponent<TMP_InputField>();
+        FindLocomotionObjectIfNeeded();
 
         if (inputField != null)
         {
@@ -29,8 +42,6 @@ public class InputFieldMovementBlocker : MonoBehaviour
         }
     }
 
-    private bool isActivating;
-
     private void Update()
     {
         if (inputField == null)
@@ -43,22 +54,43 @@ public class InputFieldMovementBlocker : MonoBehaviour
 
         if (!inputField.isFocused && !isActivating)
         {
-            if (Input.GetKeyDown(KeyCode.T))
+            if (WasKeyPressed(activateKey))
             {
                 StartCoroutine(ActivateInputFieldDeferred());
             }
         }
         else if (inputField.isFocused)
         {
-            if (Input.GetKeyDown(KeyCode.Escape))
+            if (WasKeyPressed(KeyCode.Escape))
             {
                 inputField.DeactivateInputField();
-                if (UnityEngine.EventSystems.EventSystem.current != null)
+                if (EventSystem.current != null)
                 {
-                    UnityEngine.EventSystems.EventSystem.current.SetSelectedGameObject(null);
+                    EventSystem.current.SetSelectedGameObject(null);
                 }
             }
         }
+    }
+
+    private static bool WasKeyPressed(KeyCode key)
+    {
+#if ENABLE_INPUT_SYSTEM
+        var keyboard = Keyboard.current;
+        if (keyboard == null)
+            return false;
+
+        switch (key)
+        {
+            case KeyCode.T:
+                return keyboard.tKey.wasPressedThisFrame;
+            case KeyCode.Escape:
+                return keyboard.escapeKey.wasPressedThisFrame;
+            default:
+                return false;
+        }
+#else
+        return Input.GetKeyDown(key);
+#endif
     }
 
     private IEnumerator ActivateInputFieldDeferred()
@@ -93,32 +125,32 @@ public class InputFieldMovementBlocker : MonoBehaviour
         if (inputField.isFocused)
             return true;
 
-        var eventSystem = UnityEngine.EventSystems.EventSystem.current;
+        var eventSystem = EventSystem.current;
         return eventSystem != null && eventSystem.currentSelectedGameObject == gameObject;
     }
 
     private void BlockMovement()
     {
         SetLocomotionActive(false);
-        SetXrMovementProvidersActive(false);
-#if UNITY_INPUT_SYSTEM
-        SetPlayerInputActive(false);
-        SetUISubmitActive(false);
+        SetInputBlockingBehavioursActive(false);
+#if ENABLE_INPUT_SYSTEM
+        SetGameplayActionMapsActive(false);
 #endif
     }
 
     private void RestoreMovement()
     {
         RestoreLocomotion();
-        SetXrMovementProvidersActive(true);
-#if UNITY_INPUT_SYSTEM
-        SetPlayerInputActive(true);
-        SetUISubmitActive(true);
+        SetInputBlockingBehavioursActive(true);
+#if ENABLE_INPUT_SYSTEM
+        SetGameplayActionMapsActive(true);
 #endif
     }
 
     private void SetLocomotionActive(bool isActive)
     {
+        FindLocomotionObjectIfNeeded();
+
         if (locomotionObject == null)
             return;
 
@@ -143,14 +175,47 @@ public class InputFieldMovementBlocker : MonoBehaviour
         isBlockingMovement = false;
     }
 
-    private void SetXrMovementProvidersActive(bool isActive)
+    private void FindLocomotionObjectIfNeeded()
+    {
+        if (locomotionObject != null && locomotionObject.name == "Move")
+            return;
+
+#if UNITY_2023_1_OR_NEWER
+        var transforms = FindObjectsByType<Transform>(FindObjectsInactive.Include);
+#else
+        var transforms = FindObjectsOfType<Transform>(true);
+#endif
+
+        foreach (var currentTransform in transforms)
+        {
+            if (currentTransform.name == "Move")
+            {
+                locomotionObject = currentTransform.gameObject;
+                return;
+            }
+        }
+
+        if (locomotionObject != null)
+            return;
+
+        foreach (var currentTransform in transforms)
+        {
+            if (currentTransform.name == "Locomotion")
+            {
+                locomotionObject = currentTransform.gameObject;
+                return;
+            }
+        }
+    }
+
+    private void SetInputBlockingBehavioursActive(bool isActive)
     {
         if (!isActive)
         {
             if (disabledMovementBehaviours.Count > 0)
                 return;
 
-            foreach (var behaviour in FindMovementBehaviours())
+            foreach (var behaviour in FindInputBlockingBehaviours())
             {
                 if (behaviour == null || behaviour == this || !behaviour.enabled)
                     continue;
@@ -171,7 +236,50 @@ public class InputFieldMovementBlocker : MonoBehaviour
         disabledMovementBehaviours.Clear();
     }
 
-    private static Behaviour[] FindMovementBehaviours()
+#if ENABLE_INPUT_SYSTEM
+    private void SetGameplayActionMapsActive(bool isActive)
+    {
+        if (!isActive)
+        {
+            if (disabledActionMaps.Count > 0)
+                return;
+
+            var actionAssets = Resources.FindObjectsOfTypeAll<InputActionAsset>();
+            foreach (var actionAsset in actionAssets)
+            {
+                if (actionAsset == null)
+                    continue;
+
+                foreach (var actionMap in actionAsset.actionMaps)
+                {
+                    if (actionMap == null || !actionMap.enabled || IsUiActionMap(actionMap))
+                        continue;
+
+                    actionMap.Disable();
+                    disabledActionMaps.Add(actionMap);
+                }
+            }
+
+            return;
+        }
+
+        for (int i = 0; i < disabledActionMaps.Count; i++)
+        {
+            if (disabledActionMaps[i] != null)
+                disabledActionMaps[i].Enable();
+        }
+
+        disabledActionMaps.Clear();
+    }
+
+    private static bool IsUiActionMap(InputActionMap actionMap)
+    {
+        var mapName = actionMap.name.ToLowerInvariant();
+        return mapName == "ui" || mapName.Contains("ui");
+    }
+#endif
+
+    private static Behaviour[] FindInputBlockingBehaviours()
     {
 #if UNITY_2023_1_OR_NEWER
         var behaviours = FindObjectsByType<Behaviour>(FindObjectsInactive.Include);
@@ -182,68 +290,21 @@ public class InputFieldMovementBlocker : MonoBehaviour
 
         foreach (var behaviour in behaviours)
         {
-            if (IsXrMovementBehaviour(behaviour))
+            if (ShouldDisableWhileTyping(behaviour))
                 movementBehaviours.Add(behaviour);
         }
 
         return movementBehaviours.ToArray();
     }
 
-    private static bool IsXrMovementBehaviour(Behaviour behaviour)
+    private static bool ShouldDisableWhileTyping(Behaviour behaviour)
     {
         var typeName = behaviour.GetType().Name;
         return typeName.Contains("MoveProvider") ||
                typeName.Contains("TurnProvider") ||
                typeName.Contains("LocomotionProvider") ||
-               typeName.Contains("TeleportationProvider");
+               typeName.Contains("TeleportationProvider") ||
+               typeName.Contains("XRDeviceSimulator") ||
+               typeName.Contains("DeviceSimulator");
     }
-
-#if UNITY_INPUT_SYSTEM
-    private UnityEngine.InputSystem.PlayerInput cachedPlayerInput;
-
-    private void SetPlayerInputActive(bool active)
-    {
-        if (!active)
-        {
-            if (cachedPlayerInput != null)
-                return;
-
-#if UNITY_2023_1_OR_NEWER
-            cachedPlayerInput = FindFirstObjectByType<UnityEngine.InputSystem.PlayerInput>();
-#else
-            cachedPlayerInput = FindObjectOfType<UnityEngine.InputSystem.PlayerInput>();
-#endif
-            if (cachedPlayerInput != null)
-            {
-                cachedPlayerInput.enabled = false;
-            }
-        }
-        else
-        {
-            if (cachedPlayerInput != null)
-            {
-                cachedPlayerInput.enabled = true;
-                cachedPlayerInput = null;
-            }
-        }
-    }
-
-    private void SetUISubmitActive(bool active)
-    {
-        var eventSystem = UnityEngine.EventSystems.EventSystem.current;
-        if (eventSystem == null) return;
-
-        var inputModule = eventSystem.GetComponent<UnityEngine.InputSystem.UI.InputSystemUIInputModule>();
-        if (inputModule == null) return;
-
-        var submitAction = inputModule.submit;
-        if (submitAction != null && submitAction.action != null)
-        {
-            if (active)
-                submitAction.action.Enable();
-            else
-                submitAction.action.Disable();
-        }
-    }
-#endif
 }

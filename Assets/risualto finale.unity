@@ -1779,6 +1779,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   locomotionObject: {fileID: 0}
+  activateKey: 116
 --- !u!114 &1589377342
 MonoBehaviour:
   m_ObjectHideFlags: 0
